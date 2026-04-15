@@ -1,0 +1,255 @@
+{
+  "name": "🤖 CIMM Crypto News Auto Bot v1",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "cimm-001-schedule",
+      "name": "⏰ Every 1 Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        120,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════\n// CIMM Crypto News Bot - Fetch All Sources\n// Sources: CoinDesk RSS, Cointelegraph RSS, Decrypt RSS,\n//          CoinGecko Trending API\n// ══════════════════════════════════════════════════════\n\nconst articles = [];\n\n// ── RSS Feeds ──────────────────────────────────────────\nconst rssFeeds = [\n  { url: 'https://www.coindesk.com/arc/outboundfeeds/rss/', limit: 5 },\n  { url: 'https://cointelegraph.com/rss', limit: 5 },\n  { url: 'https://decrypt.co/feed', limit: 3 },\n];\n\nfor (const feed of rssFeeds) {\n  try {\n    const res = await fetch(feed.url, {\n      signal: AbortSignal.timeout(12000),\n      headers: { 'User-Agent': 'Mozilla/5.0 CIMMBot/1.0' }\n    });\n    const xml = await res.text();\n    const items = xml.match(/<item[\\s\\S]*?<\\/item>/g) || [];\n\n    for (const item of items.slice(0, feed.limit)) {\n      const title = (\n        item.match(/<title><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/title>/)?.[1] ||\n        item.match(/<title>([^<]*)<\\/title>/)?.[1] || ''\n      ).trim();\n\n      const link = (\n        item.match(/<link>\\s*(https?[^<\\s]+)\\s*<\\/link>/)?.[1] ||\n        item.match(/<guid[^>]*>\\s*(https?[^<\\s]+)\\s*<\\/guid>/)?.[1] || ''\n      ).trim();\n\n      const rawDesc = (\n        item.match(/<description><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/description>/)?.[1] ||\n        item.match(/<description>([\\s\\S]*?)<\\/description>/)?.[1] || ''\n      );\n      const description = rawDesc.replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim().slice(0, 500);\n\n      const pubDate = item.match(/<pubDate>([^<]+)<\\/pubDate>/)?.[1]?.trim() || new Date().toUTCString();\n\n      if (title && link) {\n        articles.push({\n          title,\n          link,\n          description,\n          pubDate,\n          source: new URL(feed.url).hostname.replace('www.', ''),\n          contentType: 'rss_news'\n        });\n      }\n    }\n  } catch (e) {\n    console.log(`[RSS Error] ${feed.url}: ${e.message}`);\n  }\n}\n\n// ── CoinGecko Trending ─────────────────────────────────\ntry {\n  const cgRes = await fetch('https://api.coingecko.com/api/v3/search/trending', {\n    signal: AbortSignal.timeout(10000)\n  });\n  const cgData = await cgRes.json();\n\n  for (const { item: c } of (cgData.coins || []).slice(0, 3)) {\n    const rank = c.market_cap_rank ? `#${c.market_cap_rank}` : 'N/A';\n    articles.push({\n      title: `🔥 Trending Coin: ${c.name} (${c.symbol.toUpperCase()}) — Market Cap Rank ${rank}`,\n      link: `https://www.coingecko.com/en/coins/${c.id}`,\n      description: `${c.name} (${c.symbol.toUpperCase()}) is trending on CoinGecko. Market Cap Rank: ${rank}. Price in BTC: ${Number(c.price_btc).toFixed(8)}`,\n      pubDate: new Date().toUTCString(),\n      source: 'coingecko.com',\n      contentType: 'trending'\n    });\n  }\n} catch (e) {\n  console.log(`[CoinGecko Error]: ${e.message}`);\n}\n\nif (articles.length === 0) {\n  return [{ json: { _skip: true, reason: 'No articles fetched from any source' } }];\n}\n\nconsole.log(`[CIMM Bot] Fetched ${articles.length} articles total`);\nreturn articles.map(a => ({ json: a }));\n"
+      },
+      "id": "cimm-002-fetch",
+      "name": "📰 Fetch All News",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        340,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════\n// CIMM Bot - Deduplicate (skip already-posted articles)\n// Uses n8n static workflow data to track posted URLs\n// ══════════════════════════════════════════════════════\n\nconst staticData = $getWorkflowStaticData('global');\n\n// Init storage\nif (!staticData.seenUrls) staticData.seenUrls = [];\n\n// Keep max 500 entries to prevent memory bloat\nif (staticData.seenUrls.length > 500) {\n  staticData.seenUrls = staticData.seenUrls.slice(-500);\n}\n\nconst newItems = [];\n\nfor (const item of $input.all()) {\n  // Skip error/empty items\n  if (item.json._skip) continue;\n\n  const url = item.json.link;\n  if (!url) continue;\n\n  // Skip if already posted\n  if (staticData.seenUrls.includes(url)) {\n    console.log(`[Dedup] Already posted: ${url}`);\n    continue;\n  }\n\n  // Mark as seen immediately\n  staticData.seenUrls.push(url);\n  newItems.push(item);\n}\n\n// Max 5 new posts per cycle (avoid spam)\nconst result = newItems.slice(0, 5);\nconsole.log(`[CIMM Bot] ${result.length} new articles to post`);\n\nreturn result.length > 0 ? result : [{ json: { _noNew: true } }];\n"
+      },
+      "id": "cimm-003-dedup",
+      "name": "🔍 Deduplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "cimm-004-split",
+      "name": "🔄 Split 1 by 1",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        780,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════\n// CIMM Bot - Claude AI Formatter\n// Converts English crypto news → Myanmar post\n// ══════════════════════════════════════════════════════\n\nconst item = $input.first().json;\n\n// Skip if no new articles signal\nif (item._noNew) {\n  console.log('[CIMM Bot] No new articles, skipping.');\n  return [];\n}\n\nconst apiKey = $vars.ANTHROPIC_API_KEY;\nif (!apiKey) throw new Error('ANTHROPIC_API_KEY variable not set in n8n!');\n\nconst SYSTEM_PROMPT = `You are the official content writer for CryptoInsiderMM (CIMM) — Myanmar's leading crypto education community on Telegram and Facebook.\n\nYour task: Rewrite English crypto news into engaging Myanmar-language social media posts.\n\nFORMAT RULES:\n1. Start with 1-2 relevant emojis (📈📉🔥💰🚀⚡💎🌊)\n2. Bold attention-grabbing title in Myanmar (*title*)  \n3. 2–3 clear summary sentences in Myanmar language\n4. Key data/numbers if mentioned in the original\n5. One sentence CIMM community call-to-action\n6. Hashtags on final line: #CryptoInsiderMM #ကရစ်တို + relevant coin/topic tags\n\nSTYLE RULES:\n- Write in standard Myanmar Unicode (not Zawgyi)\n- Keep it professional but exciting  \n- Max 280 words total\n- Do NOT include source URLs in the post body\n- Always close with #CryptoInsiderMM`;\n\nconst userMessage = `Crypto News to format:\n\n**Title:** ${item.title}\n**Source:** ${item.source}\n**Content:** ${item.description}\n\nWrite the full Myanmar-language social media post now.`;\n\nlet formattedPost = '';\n\ntry {\n  const response = await fetch('https://api.anthropic.com/v1/messages', {\n    method: 'POST',\n    headers: {\n      'Content-Type': 'application/json',\n      'anthropic-version': '2023-06-01',\n      'x-api-key': apiKey,\n    },\n    body: JSON.stringify({\n      model: 'claude-sonnet-4-20250514',\n      max_tokens: 700,\n      system: SYSTEM_PROMPT,\n      messages: [{ role: 'user', content: userMessage }]\n    })\n  });\n\n  const data = await response.json();\n\n  if (data.error) {\n    throw new Error(`Claude API Error: ${data.error.message}`);\n  }\n\n  formattedPost = data.content?.[0]?.text?.trim() || '';\n  console.log('[CIMM Bot] Claude formatted post successfully');\n\n} catch (e) {\n  console.error('[Claude Error]:', e.message);\n  // Fallback: simple format\n  formattedPost = `📰 *${item.title}*\\n\\n${item.description.slice(0, 200)}...\\n\\n#CryptoInsiderMM #ကရစ်တို`;\n}\n\nreturn [{\n  json: {\n    ...item,\n    formattedPost,\n    postText: formattedPost + '\\n\\n🔗 ' + item.link,\n  }\n}];\n"
+      },
+      "id": "cimm-005-claude",
+      "name": "🤖 AI Format (Claude)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $vars.TELEGRAM_CHANNEL_ID }}",
+        "text": "={{ $json.postText }}",
+        "additionalFields": {
+          "parse_mode": "Markdown",
+          "disable_web_page_preview": false
+        }
+      },
+      "id": "cimm-006-telegram",
+      "name": "📱 Telegram Channel",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1220,
+        240
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "CIMM Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/v19.0/' + $vars.FB_PAGE_ID + '/feed' }}",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "message",
+              "value": "={{ $json.postText }}"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $vars.FB_PAGE_TOKEN }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cimm-007-facebook",
+      "name": "📘 Facebook Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1220,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "unit": "seconds",
+        "resume": "timeInterval",
+        "amount": 10
+      },
+      "id": "cimm-008-wait",
+      "name": "⏳ Wait 10s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1440,
+        360
+      ],
+      "webhookId": "cimm-wait-webhook"
+    }
+  ],
+  "connections": {
+    "⏰ Every 1 Hour": {
+      "main": [
+        [
+          {
+            "node": "📰 Fetch All News",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📰 Fetch All News": {
+      "main": [
+        [
+          {
+            "node": "🔍 Deduplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔍 Deduplicate": {
+      "main": [
+        [
+          {
+            "node": "🔄 Split 1 by 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔄 Split 1 by 1": {
+      "main": [
+        [
+          {
+            "node": "🤖 AI Format (Claude)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "🤖 AI Format (Claude)": {
+      "main": [
+        [
+          {
+            "node": "📱 Telegram Channel",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "📘 Facebook Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📱 Telegram Channel": {
+      "main": [
+        [
+          {
+            "node": "⏳ Wait 10s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📘 Facebook Page": {
+      "main": []
+    },
+    "⏳ Wait 10s": {
+      "main": [
+        [
+          {
+            "node": "🔄 Split 1 by 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "CIMM"
+    },
+    {
+      "name": "crypto-bot"
+    },
+    {
+      "name": "auto-post"
+    }
+  ],
+  "triggerCount": 1,
+  "versionId": "cimm-news-bot-v1-0"
+}
